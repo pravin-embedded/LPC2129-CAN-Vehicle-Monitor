@@ -32,7 +32,7 @@ The cockpit / HMI node. It owns the user switches and the display.
 
 * **DS18B20** digital temperature sensor (1-Wire) for engine temperature
 * **LCD** 20x4 character display showing temperature, fuel, mode and reverse status
-* **Mode selection switch** (FORWARD / BACKWARD) on an external interrupt
+* **Mode selection switch** (FORWARD / REVERSE) on an external interrupt
 * **Left indicator** and **Right indicator** switches, also on external interrupts
 * **CAN** - transmits indicator commands, receives fuel level and reverse status
 
@@ -40,10 +40,15 @@ The cockpit / HMI node. It owns the user switches and the display.
 
 The rear node. It actuates the indicators and watches for obstacles.
 
-* **8 LEDs** used as left/right indicator bars (scrolling chase effect)
+* **Four LEDs** (`P0.4` - `P0.7`) forming a single indicator bar, run as a
+  scrolling chase effect
 * **Ultrasonic sensor (HC-SR04)** for obstacle distance
 * Derives a **SAFE / WARNING / STOP** reverse status from the measured distance
 * **CAN** - receives indicator commands, transmits reverse status
+
+> The block diagram labels this bar as "8 LEDs". The firmware drives **four**
+> pins (`P0.4` - `P0.7`); see `LED_BLINK.c`. The diagram reflects the intended
+> hardware, the code reflects what is implemented.
 
 ### FUEL NODE
 
@@ -53,6 +58,12 @@ The fuel-tank node.
 * Converts the raw ADC count to a **fuel percentage**
 * **LCD** shows the raw ADC value, the percentage and a low-fuel warning
 * **CAN** - transmits the fuel percentage
+
+### Buzzer
+
+The block diagram shows a **buzzer** on the Main node. This is **planned hardware
+only - it is not implemented in the firmware**. There is no buzzer driver, no
+output pin assignment and no reference to a buzzer anywhere in `CAN_Project/`.
 
 ---
 
@@ -94,6 +105,8 @@ single shared driver simple while still keeping the application message map clea
 The bit timing is computed at compile time in `CAN_Project/can_defines.h` and is
 shared verbatim by all three nodes.
 
+### Design intent - the configuration the firmware is written against
+
 | Parameter | Value |
 | --------- | ----- |
 | FOSC (crystal) | 12 MHz |
@@ -113,6 +126,50 @@ shared verbatim by all three nodes.
 `PCLK / BIT_RATE = 15 000 000 / 125 000 = 120 = BRP x QUANTA = 6 x 20`,
 which is why `QUANTA = 20` was chosen - `QUANTA = 16` would have needed
 `BRP = 7.5`, which is not possible.
+
+The 15 MHz PCLK assumption is stated independently in four places in the source,
+so it is unambiguously the configuration the firmware is written against:
+
+* `can_defines.h` - `#define PCLK 15000000`
+* `ADC_defines.h` - `#define CCLK (5*FOSC)` with `#define PCLK (CCLK/4)`
+* `REVERSE.c` - `T0PR = 14`, commented as giving 1 us at PCLK = 15 MHz
+* `delay.c` - the `* 12000` loop count only yields 1 ms at a 60 MHz CCLK
+
+`C1BTR` is not hand-typed. It is assembled from `SAM`, `TSEG1`, `TSEG2`, `SJW`
+and `BRP`, and `can_defines.h` carries `#error` guards that fail the build if the
+prescaler is not a whole number or falls outside the LPC2129 limits.
+
+### Startup file: recorded values and an open question
+
+`Startup.s` is treated as read-only project configuration and has **not** been
+modified by this review. Its actual contents are recorded here so that nothing has
+to be guessed later:
+
+| Startup.s symbol | Value | Effect |
+| ---------------- | ----- | ------ |
+| `PLL_SETUP` | `1` | the PLL block is executed |
+| `PLLCFG_Val` | `0x00000024` | see below |
+| `VPBDIV_SETUP` | `0` | the `VPBDIV` write is **skipped** by its `IF VPBDIV_SETUP <> 0` guard, so the register keeps its reset value of 0 -> VPB clock = CPU clock / 4 |
+| `MAM_SETUP`, `MAMCR_Val`, `MAMTIM_Val` | `1`, `0x02`, `0x04` | MAM fully enabled, 4 fetch wait states |
+
+`Startup.s` in this repository is byte-for-byte identical (SHA-256
+`A7C35953E69581CFCE12EC198E820509CA000FC9A228103E8BE344F90207E3C1`) to the stock
+Keil `STARTUP\Philips\Startup.s` shipped with uVision. It is the **unmodified
+Config Wizard default** and was never reconfigured for this board.
+
+Decoding `0x00000024` using the field layout that the same file documents in its
+Config Wizard block (`<o1.0..4> MSEL` with `<1-32><#-1>`, `<o1.5..6> PSEL` with
+`<0=>1 <1=>2 <2=>4 <3=>8>`) yields **M = 5, P = 2**, which from a 12 MHz crystal
+means **CCLK = 30 MHz** and therefore PCLK = 7.5 MHz. That contradicts the
+60 MHz / 15 MHz intent above, and if 30 MHz were the effective clock the CAN bit
+rate would be 62.5 kbps instead of 125 kbps.
+
+This has deliberately **not** been "fixed", because resolving it means editing
+`Startup.s`, which is out of scope. Since all three nodes use the identical
+`Startup.s`, the three nodes agree with each other either way; the only practical
+consequence is the absolute bit rate on the wire. Confirm it on the bench (or by
+reading the PLL status registers) before connecting the bus to anything else.
+See the hardware checklist below.
 
 ---
 
@@ -144,26 +201,39 @@ leaving `P0.17` free on the Main node.
 
 | Function | Pin | Source |
 | -------- | --- | ------ |
-| Indicator LEDs (active low) | `P0.4 - P0.7` | `LED_BLINK.c` |
+| Indicator LEDs, active low (`IOCLR0` = on) | `P0.4` - `P0.7` (four pins) | `LED_BLINK.c` |
 | Ultrasonic `TRIG` | `P0.16` | `LED_BLINK.h` |
 | Ultrasonic `ECHO` | `P0.17` | `LED_BLINK.h` |
 | CAN1 `RX` (RD1) | `P0.25` | `can_defines.h` |
+
+Chase directions are set by the loop bounds in `LED_BLINK.c`:
+
+* `Blink_left()`  - `for(i = 4; i < 8; i++)` -> `P0.4` -> `P0.7`
+* `Blink_right()` - `for(i = 7; i > 3; i--)` -> `P0.7` -> `P0.4`
 
 ### Fuel node
 
 | Function | Pin | Source |
 | -------- | --- | ------ |
-| ADC analogue inputs enabled | `P0.27 - P0.30` (`PINSEL1 |= 0x15400000`) | `ADC_defines.c` |
-| ADC channel actually read | `CH0` | `FUEL.c` |
+| ADC channel selected | `CH0`, which is `AD0.0` on **`P0.25`** | `FUEL.c` |
+| ADC analogue pins enabled | `P0.27` - `P0.30` (`AD0.2` - `AD0.5`) via `PINSEL1 \|= 0x15400000` | `ADC_defines.c` |
 | LCD data `D0-D7` | `P0.8 - P0.15` | `LCD_DEF.c` |
 | LCD `RS` / `EN` | `P0.16` / `P0.18` | `LCD_DEF.c` |
 | CAN1 `RX` (RD1) | `P0.25` | `can_defines.h` |
+
+> **Open point, not changed.** `FUEL.c` reads `CH0`, which on the LPC2129 is
+> `AD0.0` = `P0.25`. On this node `P0.25` is also configured as `CAN1_RD1` by
+> `Init_CAN1()`. Meanwhile `ADC_Init()` enables the analogue function on
+> `P0.27` - `P0.30` (`AD0.2` - `AD0.5`), none of which is the channel being read.
+> Both `PINSEL1` writes target different bits so neither overwrites the other,
+> but the channel actually being sampled is `P0.25`. Which pin the fuel sensor is
+> really wired to must be confirmed on the board before this node is trusted.
 
 ### Other
 
 | Function | Value | Source |
 | -------- | ----- | ------ |
-| Timer0 prescaler (ultrasonic timing) | `T0PR = 14` -> ~1 us per tick at PCLK = 15 MHz | `REVERSE.c` |
+| Timer0 prescaler (ultrasonic echo timing) | `T0PR = 14` -> ~1 us per tick at PCLK = 15 MHz | `REVERSE.c` |
 | ADC clock divider | `ADCLK = 3 MHz` | `ADC_defines.h` |
 
 ---
@@ -204,6 +274,7 @@ projects.
     |-- CAN.uvproj                MAIN node      -> CAN.hex
     |-- REVERSE.uvproj            REVERSE node   -> REVERSE.hex
     |-- FUEL.uvproj               FUEL node      -> FUEL.hex
+    |-- README.txt                Short plain-text notes on the three projects
     |
     |-- CAN_Main.c                Main node application
     |-- REVERSE.c                 Reverse / indicator node application
@@ -232,49 +303,76 @@ projects.
 projects. This guarantees that every node uses the same bit timing and the same
 message IDs - the single most common source of failure in multi-node CAN designs.
 
-### Files not referenced by any project
+### The two typedef headers
 
-`type.h` and `types.h` hold identical typedef sets and are both kept because
-`delay.h` pulls in `type.h` while the rest of the code uses `types.h`. They were
-deliberately left in place rather than merged.
+`type.h` and `types.h` contain the same seven typedefs. They are **both still
+used**, so neither is dead code:
+
+* `types.h` is included by `ADC_defines.h`, `can.h`, `CAN_Main.c`, `FUEL.c`
+  and `REVERSE.c`
+* `type.h` is included by `delay.c` and `delay.h`
+
+Consolidating them onto `types.h` would mean editing `delay.c` and `delay.h`,
+which are referenced by **all three** Keil projects. That was left untouched in
+this conservative pass; see the notes below.
 
 ---
 
 ## How It Works
 
 ```
-        Main  --->  0x100  --->  Reverse
-        Fuel   --->  0x101  --->  Main
-        Reverse ---> 0x102  --->  Main
+        Main    --->  0x100  --->  Reverse
+        Fuel     --->  0x101  --->  Main
+        Reverse  --->  0x102  --->  Main
 ```
 
 ### Main node
 
 1. The three switches are wired to **external interrupt** pins, so a press is
-   captured immediately by the CPU rather than being polled.
-   The ISRs in `switch.c` only set flags (`indicator`, `mode`); the CAN work is
-   done later in the main loop.
+   captured immediately by the CPU rather than being polled. The ISRs in
+   `switch.c` only set flags (`indicator`, `mode`); the CAN work is done later in
+   the main loop.
 2. `Service_CAN()` drains the receive buffer completely and stores the newest
    fuel percentage and reverse status.
-3. `Service_Indicator()` sends a **single** `0x100` frame per switch press,
-   and only while in `FORWARD` mode. In `REVERSE` the pending command is
-   discarded so it does not fire later.
+3. `Service_Indicator()` sends a **single** `0x100` frame per switch press, and
+   only while in `FORWARD` mode. In `REVERSE` the pending command is discarded so
+   it does not fire later.
 4. The DS18B20 conversion normally takes ~750 ms. That wait is deliberately
    **split into 75 slices of 10 ms**, and CAN servicing runs inside every slice,
-   so incoming fuel and reverse frames are never left waiting in the
-   controller's receive buffer.
+   so incoming fuel and reverse frames are never left waiting in the controller's
+   receive buffer.
 5. The LCD is refreshed with temperature, fuel percentage, mode and - in
    `REVERSE` mode - the reverse status.
 
 ### Reverse node
 
 1. Drains the receive buffer; frames that are not `0x100` are ignored.
-2. An `IND_LEFT` or `IND_RIGHT` command scrolls the 4-LED bar one LED at a time
-   (100 ms per LED) in the requested direction.
-3. Triggers the HC-SR04 and measures the echo width with Timer0 at a 1 us tick.
-4. Maps the distance to a status:
-   `> 50 cm` -> `SAFE`, `> 20 cm` -> `WARNING`, otherwise `STOP`.
+2. An `IND_LEFT` or `IND_RIGHT` command scrolls the four-LED bar one LED at a
+   time (100 ms per LED) in the requested direction.
+3. Triggers the HC-SR04 and measures the echo width with Timer0 at a ~1 us tick.
+4. Maps the result to a status (see the table below).
 5. Sends the status as `0x102`, then waits 100 ms before the next cycle.
+
+#### Ultrasonic return values and how they become a status
+
+`Ultrasonic_Trigger()` in `reverse_def.c` returns `unsigned int`:
+
+| Return value | Meaning inside the driver |
+| ------------ | ------------------------- |
+| `0` | ECHO never rose within the `TIMEOUT` loop count - sensor not connected or not responding |
+| `1` .. `~1693` | measured distance in cm, computed as `T0TC / 59` |
+| `999` (`OUT_OF_RANGE_CM`) | ECHO stayed high past `ECHO_MAX_US` (30 ms) - nothing within range |
+
+`REVERSE.c` then applies fixed thresholds to whatever came back:
+
+| Returned value | Status sent on `0x102` |
+| -------------- | ---------------------- |
+| `> 50` (includes `999`) | `SAFE` |
+| `21` .. `50` | `WARNING` |
+| `<= 20` (includes `0`) | `STOP` |
+
+So a silent sensor returns `0` and is reported as `STOP` - a deliberate fail-safe.
+An out-of-range return of `999` is reported as `SAFE`.
 
 ### Fuel node
 
@@ -300,8 +398,8 @@ or CI build in this repository - VS Code is used only as an editor here.
 3. Confirm the target device is **LPC2129** (`Options for Target > Device`).
 4. `Project > Rebuild all target files`.
 
-Each project writes its output next to the sources
-(`OutputDirectory = .\`) and `CreateHexFile` is enabled, so you get:
+Each project writes its output next to the sources (`OutputDirectory = .\`) and
+`CreateHexFile` is enabled, so you get:
 
 | Project | Output |
 | ------- | ------ |
@@ -321,12 +419,13 @@ Implemented in this repository:
 
 * Three-node CAN network on a shared bus with a shared, compile-time-checked
   bit-timing definition
-* 125 kbps standard data frames, `DLC = 1`, single application value in `Data1`
-* Mode switch (FORWARD / BACKWARD) on external interrupt EINT0
+* 125 kbps standard data frames, `DLC = 1`, single application value in `Data1`,
+  `Data2` always 0
+* Mode switch (FORWARD / REVERSE) on external interrupt EINT0
 * Left and right indicator switches on external interrupts EINT1 / EINT2
 * Indicator commands transmitted as `0x100` only in FORWARD mode
-* 4-LED-per-side scrolling indicator chase effect, left and right
-* HC-SR04 ultrasonic distance measurement with a hardware-timed echo width
+* Four-LED scrolling indicator chase effect (`P0.4` - `P0.7`), left and right
+* HC-SR04 ultrasonic distance measurement with a Timer0-timed echo width
 * SAFE / WARNING / STOP reverse classification with a fail-safe `STOP` when the
   sensor does not answer at all
 * Reverse status transmitted as `0x102` at roughly 10 frames/s
@@ -340,74 +439,127 @@ Implemented in this repository:
 * Non-blocking DS18B20 wait so CAN reception is never starved for more than
   ~10 ms
 
+**Not implemented:** the buzzer shown in the block diagram. There is no buzzer
+driver in the firmware.
+
+---
+
+## Hardware Test Checklist
+
+Nothing below has been verified on hardware or in Proteus from this repository -
+this is a checklist for the bring-up session, not a record of results.
+
+### Before powering up
+
+- [ ] **All three nodes built from the same source.** Confirm the same
+      `can_defines.h` and `can_ids.h` produced all three `.hex` files. Nodes with
+      different bit timing simply will not see each other.
+- [ ] **Crystal frequency** on each board matches the `FOSC` assumption.
+- [ ] **MCP2551 transceiver fitted on every node** - the LPC2129 CAN controller
+      is not a bus-level driver and CANH/CANL must be driven through a
+      transceiver.
+- [ ] **Termination at both physical ends of the bus only** (two 120 ohm
+      resistors, CANH to CANL). Do not terminate at the middle node.
+
+### Confirm the effective bit rate before joining any other bus
+
+- [ ] Measure the bit rate, or read back the PLL status registers, to confirm
+      whether the node is running the intended 125 kbps. This matters because of
+      the `Startup.s` question recorded in the CAN Timing section.
+
+### Per node
+
+- [ ] **Main node** - DS18B20 `DQ` connected to the pin named by `OW_PIN` in
+      `onewire.h`, with a **4.7k pull-up to 3.3 V**.
+- [ ] **Main node** - LCD `RW` strapped to **GND**. This is what frees `P0.17`
+      for the DS18B20; leaving `RW` floating will conflict.
+- [ ] **Fuel node** - confirm the fuel sensor is wired to the pin the firmware
+      actually samples (`AD0.0` = `P0.25`), not to one of `P0.27`-`P0.30`.
+- [ ] **Fuel node** - re-fit `ADC_EMPTY` / `ADC_FULL` in `FUEL.c` to the real
+      sensor's empty and full readings before trusting the percentage.
+- [ ] **Reverse node** - HC-SR04 needs 5 V on Vcc and its Echo pin level-shifted
+      to 3.3 V for the LPC2129.
+
+### Bring-up order
+
+1. Power one node at a time and confirm it runs and its LCD is sane.
+2. Add the second and third node, then confirm frames are seen on the bus.
+3. Only then exercise the cross-node behaviour (indicators, fuel, reverse alert).
+
 ---
 
 ## Notes
 
-### Hardware verification required
+### Protected files
 
-This repository contains firmware only. **No Proteus project, schematic or
-board design files are included.** Behaviour on real hardware depends on:
+`Startup.s` was treated as read-only throughout this review and is unchanged.
+Its hash before and after the review is
+`A7C35953E69581CFCE12EC198E820509CA000FC9A228103E8BE344F90207E3C1`.
 
-* the actual crystal frequency fitted on each board,
-* correct CAN bus wiring, an MCP2551 transceiver per node and termination
-  resistors at both ends of the bus,
-* the DS18B20 `DQ` pin matching `OW_PIN` in `onewire.h` together with a 4.7k
-  pull-up to 3.3 V,
-* the LCD `RW` pin strapped to GND (this is what frees `P0.17` for the DS18B20),
-* the ADC calibration constants `ADC_EMPTY` / `ADC_FULL` being re-fitted to the
-  actual fuel sensor.
+### Findings reported but deliberately not changed
 
-Please verify the items below on hardware before relying on them.
+Each of these is a genuine observation. None was "fixed", because fixing them
+means changing behaviour in firmware that is about to be flashed to hardware.
 
-### Observations from a source review
+1. **Switch debounce is not implemented.** The ISRs in `switch.c` toggle `mode`
+   or latch `indicator` immediately on a falling edge, with no debounce and no
+   re-trigger lockout. A mechanical switch will normally produce several edges,
+   so a single press can look like several events and the mode can appear to
+   skip. Adding debounce would mean new Timer1 or polling logic and a change to
+   interrupt behaviour, so it was **not** introduced here. Proposed approach, if
+   wanted: ignore edges for ~20 ms after handling one, either with a Timer1
+   one-shot or a timestamp comparison, leaving the `EXTMODE`/`EXTPOLAR` edge
+   configuration untouched.
 
-These were found while preparing this repository. They are reported rather than
-silently changed, because changing them alters working firmware.
+2. **Ultrasonic ECHO stuck high before the trigger is not detected.**
+   `Ultrasonic_Trigger()` waits for ECHO to rise and starts Timer0 immediately
+   when it sees it high. If ECHO is already high before the trigger, the wait
+   ends instantly and the function falls into the "never went low" branch,
+   returning `999` -> `SAFE`. That is fail-*unsafe* for a broken or
+   short-to-rail sensor. A pre-trigger check such as `if(IOPIN0 & ECHO) return 0;`
+   would map that case to `0` -> `STOP`, but it **changes application
+   semantics**, so it was **not** added. Confirm the sensor behaviour on the
+   bench first.
 
-1. **PLL setting in `Startup.s` does not match the documented 60 MHz.**
-   `PLLCFG_Val = 0x00000024` decodes to `MSEL = 4` (M = 5) and `PSEL = 1` (P = 2),
-   which with a 12 MHz crystal gives **CCLK = 12 x 5 / 2 = 30 MHz**, not 60 MHz.
-   With `VPBDIV_SETUP = 0` the peripheral clock would then be 7.5 MHz rather
-   than the 15 MHz that `can_defines.h` assumes, which would put the real CAN
-   bit rate at 62.5 kbps instead of 125 kbps.
-   All three nodes build from the same `Startup.s`, so they still agree with each
-   other, but the value should be checked against the real board before
-   connecting the design to anything else on the bus.
-   For CCLK = 60 MHz the Config Wizard value would be M = 5, P = 1
-   (`PLLCFG_Val = 0x00000004`).
+3. **The reverse node blocks while an indicator scrolls.** `Blink_left()` /
+   `Blink_right()` delay 100 ms per LED across four LEDs, so the receive buffer
+   goes unserviced for roughly 400 ms during a chase. `CAN1_RecoverOverrun()`
+   exists to cover this, but it is worth watching the bus during testing.
 
-2. **ADC channel selection on the fuel node looks inconsistent.**
-   `ADC_Init()` sets `PINSEL1 |= 0x15400000`, which enables the analogue
-   function on `P0.27` - `P0.30` (`AD0.2` - `AD0.5`). `FUEL.c` then reads
-   `CH0`, which on the LPC2129 is `AD0.0` on **`P0.25`** - the same pin used
-   for `CAN1_RD1`. Confirm which pin the fuel sensor is actually wired to on
-   the board, and align `PINSEL1` and the channel constant with it.
+4. **`type.h` and `types.h` are duplicates and both are still in use.**
+   Consolidating them would require editing `delay.c` and `delay.h`, which all
+   three Keil projects compile. Neither header has an include guard, and both
+   declare `typedef signed int s32;` twice in the same file, so the migration
+   needs to add guards at the same time it swaps the includes. Left untouched.
 
-3. **`delay.c` includes `<LPC214X.H>`**, a header from a different device family
-   that is not needed by that file. It works because the file uses no register
-   from it, but the include is redundant.
+5. **`delay_US()` / `delay_MS()` are loop-count based** (`* 12` and `* 12000`).
+   Their accuracy depends on the CCLK and on the compiler optimisation level.
+   The `.uvproj` files set `<Optim>` per file (level 1 in `REVERSE.uvproj`, and
+   per-file overrides that disable optimisation for `can.c` and `FUEL.c` in the
+   other two), so the effective constants differ between nodes. This is another
+   reason to measure rather than assume the timings on hardware.
 
-4. **The block diagram shows a buzzer on the Main node**, but the current
-   firmware contains no buzzer driver or output pin assignment. The diagram
-   describes the intended hardware; the buzzer is not implemented in code.
+### Driver review notes
 
-5. **The reverse node blocks while an indicator is scrolling.**
-   `Blink_left()` / `Blink_right()` delay 100 ms per LED, so the receive buffer
-   is not serviced for roughly 400 ms during a chase. CAN overrun recovery is in
-   place to cover this, but it is worth observing on the bus during testing.
-
-6. **`delay_US()` / `delay_MS()` are loop-count based** (`* 12` and `* 12000`)
-   and therefore depend on the optimisation level and the actual CCLK. They are
-   accurate only for the clock the project was tuned against.
+* `CAN1_Rx()` reads `C1RID`, `C1RFS`, `C1RDA` and `C1RDB` **before** writing
+  `RRB` to `C1CMR`, so the frame data is captured before the receive buffer is
+  released. This ordering is correct and was left as-is.
+* `CAN1_RecoverOverrun()` is gated by `CAN_OVERRUN_RECOVERY` (currently `1`).
+  Setting it to `0` disables the re-init and gives plain reference behaviour. It
+  is internally consistent and was left as-is.
+* `CAN1_Tx()` waits on `TBS1` and then on `TCS1` with **no timeout**, as
+  intended for this project. A bounded timeout remains a possible future
+  improvement; it was **not** added, and the function signature was **not**
+  changed.
 
 ### Diagram
 
 `docs/project-overview.svg` is a vector redraw of the project block diagram. It
-is kept as SVG so it stays crisp on GitHub at any zoom level.
+is kept as SVG so it stays crisp on GitHub at any zoom level. It shows the buzzer
+and an 8-LED indicator bar, which the firmware does not implement; see above.
 
 ---
 
 ## License
 
-No licence file is included in this repository.
+No licence chosen yet - owner to decide.
