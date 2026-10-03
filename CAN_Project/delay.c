@@ -1,5 +1,4 @@
 #include "type.h"
-#include<LPC214X.H>
 #include "delay.h"
 void delay_US(u32 delayus)
 {
