@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------------------
+# Keil uVision / ARMCC generated build artefacts
+# ---------------------------------------------------------------------------
+*.axf
+*.hex
+*.bin
+*.map
+*.lst
+*.obj
+*.o
+*.crf
+*.d
+*.dep
+*.iex
+*.html
+*.htm
+*.build_log.htm
+*.sct.bak
+
+# ---------------------------------------------------------------------------
+# Generated output folders used by many IDE integrations
+# ---------------------------------------------------------------------------
+Debug/
+Release/
+Objects/
+Listings/
+Output/
+Build/
+build/
+out/
+
+# ---------------------------------------------------------------------------
+# Keil project backups / user files
+# ---------------------------------------------------------------------------
+*.uvguix.*
+*.uvopt.bak
+*.bak
+*.tmp
+*.orig
+*~
+
+# ---------------------------------------------------------------------------
+# Editor / OS noise
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# IMPORTANT: the following are deliberately NOT ignored.
+#   *.c  *.h  *.s  *.uvproj  README.md  docs/
+# They are the actual project sources, Keil projects and documentation.
+# ---------------------------------------------------------------------------
