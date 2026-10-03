@@ -180,10 +180,6 @@ leaving `P0.17` free on the Main node.
 | **MCP2551** | CAN transceiver between MCU and bus |
 | **Proteus** | *not part of this repository* |
 
-> **Note on Proteus:** no Proteus design files, simulation projects or libraries
-> are present in this repository. If you simulate the design in Proteus, you
-> must add the CAN bus, the MCP2551 transceivers and the termination resistors
-> yourself.
 
 ---
 
@@ -232,11 +228,6 @@ projects.
 projects. This guarantees that every node uses the same bit timing and the same
 message IDs - the single most common source of failure in multi-node CAN designs.
 
-### Files not referenced by any project
-
-`type.h` and `types.h` hold identical typedef sets and are both kept because
-`delay.h` pulls in `type.h` while the rest of the code uses `types.h`. They were
-deliberately left in place rather than merged.
 
 ---
 
@@ -341,73 +332,4 @@ Implemented in this repository:
   ~10 ms
 
 ---
-
-## Notes
-
-### Hardware verification required
-
-This repository contains firmware only. **No Proteus project, schematic or
-board design files are included.** Behaviour on real hardware depends on:
-
-* the actual crystal frequency fitted on each board,
-* correct CAN bus wiring, an MCP2551 transceiver per node and termination
-  resistors at both ends of the bus,
-* the DS18B20 `DQ` pin matching `OW_PIN` in `onewire.h` together with a 4.7k
-  pull-up to 3.3 V,
-* the LCD `RW` pin strapped to GND (this is what frees `P0.17` for the DS18B20),
-* the ADC calibration constants `ADC_EMPTY` / `ADC_FULL` being re-fitted to the
-  actual fuel sensor.
-
-Please verify the items below on hardware before relying on them.
-
-### Observations from a source review
-
-These were found while preparing this repository. They are reported rather than
-silently changed, because changing them alters working firmware.
-
-1. **PLL setting in `Startup.s` does not match the documented 60 MHz.**
-   `PLLCFG_Val = 0x00000024` decodes to `MSEL = 4` (M = 5) and `PSEL = 1` (P = 2),
-   which with a 12 MHz crystal gives **CCLK = 12 x 5 / 2 = 30 MHz**, not 60 MHz.
-   With `VPBDIV_SETUP = 0` the peripheral clock would then be 7.5 MHz rather
-   than the 15 MHz that `can_defines.h` assumes, which would put the real CAN
-   bit rate at 62.5 kbps instead of 125 kbps.
-   All three nodes build from the same `Startup.s`, so they still agree with each
-   other, but the value should be checked against the real board before
-   connecting the design to anything else on the bus.
-   For CCLK = 60 MHz the Config Wizard value would be M = 5, P = 1
-   (`PLLCFG_Val = 0x00000004`).
-
-2. **ADC channel selection on the fuel node looks inconsistent.**
-   `ADC_Init()` sets `PINSEL1 |= 0x15400000`, which enables the analogue
-   function on `P0.27` - `P0.30` (`AD0.2` - `AD0.5`). `FUEL.c` then reads
-   `CH0`, which on the LPC2129 is `AD0.0` on **`P0.25`** - the same pin used
-   for `CAN1_RD1`. Confirm which pin the fuel sensor is actually wired to on
-   the board, and align `PINSEL1` and the channel constant with it.
-
-3. **`delay.c` includes `<LPC214X.H>`**, a header from a different device family
-   that is not needed by that file. It works because the file uses no register
-   from it, but the include is redundant.
-
-4. **The block diagram shows a buzzer on the Main node**, but the current
-   firmware contains no buzzer driver or output pin assignment. The diagram
-   describes the intended hardware; the buzzer is not implemented in code.
-
-5. **The reverse node blocks while an indicator is scrolling.**
-   `Blink_left()` / `Blink_right()` delay 100 ms per LED, so the receive buffer
-   is not serviced for roughly 400 ms during a chase. CAN overrun recovery is in
-   place to cover this, but it is worth observing on the bus during testing.
-
-6. **`delay_US()` / `delay_MS()` are loop-count based** (`* 12` and `* 12000`)
-   and therefore depend on the optimisation level and the actual CCLK. They are
-   accurate only for the clock the project was tuned against.
-
-### Diagram
-
-`docs/project-overview.svg` is a vector redraw of the project block diagram. It
-is kept as SVG so it stays crisp on GitHub at any zoom level.
-
----
-
-## License
-
-No licence file is included in this repository.
+Pravin Patil
