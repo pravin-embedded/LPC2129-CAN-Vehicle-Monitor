@@ -1,6 +1,6 @@
 ﻿# LPC2129 CAN Based Vehicle Monitoring System
 
-![System block diagram](docs/project-overview.svg)
+![System block diagram](docs/CAN_Nodes.png)
 
 ## Overview
 
@@ -24,7 +24,7 @@ The system covers three classic in-vehicle services:
 
 ## System Architecture
 
-![System block diagram](docs/project-overview.svg)
+![System block diagram](docs/CAN_Nodes.png)
 
 ### MAIN NODE
 
